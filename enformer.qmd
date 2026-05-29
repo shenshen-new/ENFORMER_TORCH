@@ -1,0 +1,281 @@
+---
+title: "Enformer Usage Guide"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+---
+
+# 1. Model Overview
+
+This project is a PyTorch reimplementation of the Enformer model.
+
+Enformer is a deep learning model capable of predicting gene expression and other regulatory functions from DNA sequences, capturing long-range interactions via attention mechanisms. This project introduces several custom modifications to the original Enformer architecture, including: shortened input sequence length, simplified downsampling mechanism, single-species training support, variable-length sequence input support, and flexible output channel configuration.
+
+**Core capability: given a DNA sequence, output predicted signals across multiple regulatory tracks.**
+
+**This project supports two label types:**
+
+| Label Type | Task Type | Label Form | Loss Function | Evaluation Metrics |
+|------------|-----------|------------|---------------|-------------------|
+| `peak` | Binary classification | 0/1 | BCE + Focal Loss | AUROC, AUPRC |
+| `coverage` | Regression | Continuous values | MSE/MAE/Poisson | Pearson r, Spearman r, MSE, R² |
+
+# 2. Usage Instructions
+
+## 2.1 Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+## 2.2 Data Preparation
+
+This project uses a unified standard format. Two types of files are required:
+
+- **Sequence file (FASTA format)**: Each entry corresponds to one complete input sequence; variable-length sequences are supported.
+- **Label file (.npy format)**: Shape `[N, target_length, num_channels]`, data type `float32`.
+
+### Step 1: Convert raw H5 data to standard format (optional)
+
+```bash
+python convert_h5_to_standard.py \
+    --h5_file dataset.h5 \
+    --output_dir standard_data \
+    --output_prefix my_species
+```
+
+Output: `standard_data/my_species.fa` + `standard_data/my_species_labels.npy`
+
+### Step 2: Split into training / validation / test sets
+
+```bash
+python split_data.py \
+    --fasta_file standard_data/my_species.fa \
+    --labels_file standard_data/my_species_labels.npy \
+    --output_dir processed_data \
+    --output_prefix my_species \
+    --split_ratios 0.7 0.15 0.15 \
+    --split_method random \
+    --seed 42
+```
+
+Outputs 6 files: one FASTA + one .npy each for train/val/test.
+
+## 2.3 Training the Model
+
+```bash
+python train.py \
+    --train_fasta processed_data/my_species_train.fa \
+    --train_labels processed_data/my_species_train_labels.npy \
+    --val_fasta processed_data/my_species_val.fa \
+    --val_labels processed_data/my_species_val_labels.npy \
+    --test_fasta processed_data/my_species_test.fa \
+    --test_labels processed_data/my_species_test_labels.npy \
+    --species_name my_species \
+    --input_length 10000 \
+    --pool_size 5 \
+    --num_conv_layers 7 \
+    --label_type peak \
+    --batch_size 8 \
+    --epochs 50 \
+    --lr 1e-4 \
+    --output_dir output_peak
+```
+
+**Parameter descriptions:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--train_fasta` / `--train_labels` | **Required** | Training set FASTA and .npy label files |
+| `--val_fasta` / `--val_labels` | **Required** | Validation set FASTA and .npy label files |
+| `--test_fasta` / `--test_labels` | **Required** | Test set FASTA and .npy label files |
+| `--species_name` | `osa` | Species name, used for output head naming |
+| `--input_length` | `10000` | Input sequence length (reference value; variable-length input is actually supported) |
+| `--pool_size` | `5` | Downsampling ratio, output length = `input_length / pool_size` |
+| `--num_conv_layers` | `7` | Number of Conv Tower convolutional layers |
+| `--batch_size` | `8` | Batch size |
+| `--lr` | `1e-4` | Learning rate |
+| `--weight_decay` | `0.01` | Weight decay |
+| `--dropout` | `0.4` | Dropout rate |
+| `--epochs` | `50` | Number of training epochs |
+| `--seed` | `42` | Random seed |
+| `--num_workers` | `4` | Number of DataLoader worker processes |
+| `--use_checkpointing` | False | Enable gradient checkpointing to save GPU memory |
+| `--label_type` | `peak` | `peak` (binary classification) or `coverage` (regression) |
+| `--coverage_loss` | `mse` | Coverage loss function: `mse` / `mae` / `poisson` |
+| `--coverage_activation` | `relu` | Coverage activation function: `relu` / `softplus` / `linear` |
+| `--log1p_transform` | Enabled | Apply log1p transform to Coverage labels (strongly recommended to keep enabled) |
+| `--no_log1p_transform` | - | Disable log1p transform |
+| `--metrics_space` | `log1p` | Metrics computation space: `log1p` (in transformed space) or `original` (back-transformed to original space) |
+| `--output_dir` | `output` | Output directory |
+
+**Training outputs:**
+
+| File | Description |
+|------|-------------|
+| `best_model.pt` | Best model on the validation set |
+| `checkpoint_epoch_N.pt` | Checkpoint saved every 5 epochs |
+| `training_log.txt` | Complete training log |
+| `training_history.json` | Training history (loss, metrics, etc.) |
+
+During training, metrics are automatically computed on the training and validation sets after each epoch. After all epochs complete, the best model is automatically loaded and evaluated on the test set.
+
+## 2.4 Testing the Model
+
+```bash
+python test.py \
+    --model_path output_peak/best_model.pt \
+    --test_fasta processed_data/my_species_test.fa \
+    --test_labels processed_data/my_species_test_labels.npy \
+    --batch_size 8 \
+    --metrics_space log1p \
+    --output_file results.json
+```
+
+**Parameter descriptions:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--model_path` | - | Path to model checkpoint (required) |
+| `--test_fasta` | - | Test set FASTA sequence file (required) |
+| `--test_labels` | - | Test set label .npy file (required) |
+| `--batch_size` | `8` | Batch size |
+| `--num_workers` | `4` | Number of DataLoader worker processes |
+| `--label_type` | Auto-inferred | Label type (inferred from model config if not specified) |
+| `--metrics_space` | `log1p` | Metrics computation space: `log1p` (in transformed space) or `original` (back-transformed to original space) |
+| `--output_file` | Optional | Path to save results JSON |
+
+## 2.5 Complete Pipeline
+
+```bash
+# Step 1: Convert H5 data to standard format
+python convert_h5_to_standard.py \
+    --h5_file dataset.h5 \
+    --output_dir standard_data \
+    --output_prefix my_species
+
+# Step 2: Split into train/val/test sets
+python split_data.py \
+    --fasta_file standard_data/my_species.fa \
+    --labels_file standard_data/my_species_labels.npy \
+    --output_dir processed_data \
+    --output_prefix my_species \
+    --split_ratios 0.7 0.15 0.15 \
+    --split_method random \
+    --seed 42
+
+# Step 3: Training (Peak label type example)
+python train.py \
+    --train_fasta processed_data/my_species_train.fa \
+    --train_labels processed_data/my_species_train_labels.npy \
+    --val_fasta processed_data/my_species_val.fa \
+    --val_labels processed_data/my_species_val_labels.npy \
+    --test_fasta processed_data/my_species_test.fa \
+    --test_labels processed_data/my_species_test_labels.npy \
+    --species_name my_species \
+    --input_length 10000 \
+    --pool_size 5 \
+    --label_type peak \
+    --batch_size 8 \
+    --epochs 50 \
+    --lr 1e-4 \
+    --output_dir output_peak
+
+# Step 4: Testing
+python test.py \
+    --model_path output_peak/best_model.pt \
+    --test_fasta processed_data/my_species_test.fa \
+    --test_labels processed_data/my_species_test_labels.npy \
+    --batch_size 8 \
+    --metrics_space log1p
+```
+
+# 3. Parameter Configuration
+
+All model parameters are centrally managed in the `EnformerConfig` class within `config.py`. Command-line arguments will override the defaults in config.py.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `dim` | 1536 | Transformer feature dimension |
+| `depth` | 11 | Number of Transformer layers |
+| `heads` | 8 | Number of multi-head attention heads |
+| `output_heads` | `{'osa': 2}` | Output head configuration; number of channels is automatically determined by the label .npy file |
+| `target_length` | 2000 | Label length, overwritten by label file during training |
+| `input_length` | 10000 | Input sequence length (reference value; variable-length input is supported) |
+| `attn_dim_key` | 64 | Attention key dimension |
+| `dropout_rate` | 0.4 | Dropout rate |
+| `attn_dropout` | 0.05 | Attention weight dropout |
+| `pos_dropout` | 0.01 | Positional encoding dropout |
+| `use_checkpointing` | False | Whether to use gradient checkpointing |
+| `pool_size` | 5 | Downsampling ratio: output length = `input_length / pool_size` |
+| `num_conv_layers` | 7 | Number of Conv Tower convolutional blocks |
+| `dim_divisible_by` | 128 | Channel dimension alignment constraint |
+| `label_type` | `'peak'` | Label type: `'peak'` or `'coverage'` |
+| `coverage_loss` | `'mse'` | Coverage loss function: `'mse'` / `'mae'` / `'poisson'` |
+| `coverage_activation` | `'relu'` | Coverage activation function: `'relu'` / `'softplus'` / `'linear'` |
+| `log1p_transform` | `True` | Whether to apply log1p transform to Coverage labels |
+
+- **To modify the downsampling ratio**: change `pool_size` in `config.py`. For example, `pool_size=2` + `input_length=10000` → output length 5000.
+- **To modify the number of output channels**: automatically determined from the last dimension of the label `.npy` file; no manual modification is required.
+
+# 4. Model Architecture
+
+```
+Input sequence:  DNA one-hot encoding [B, input_length, 4]
+    ↓
+[Stem]        Conv1d + ConvBlock + AttentionPool(pool_size)
+              → Downsampling: input_length → input_length/pool_size
+    ↓
+[Conv Tower]  N layers of ConvBlock + Residual + AttentionPool(pool_size=1)
+              → Channel transformation: 768 → 1536 (length unchanged)
+    ↓
+[Transformer] 11 layers of Multi-Head Attention + FFN
+              → Sequence modeling (length unchanged)
+    ↓
+[Final Pointwise] ConvBlock(1536→3072)
+    ↓
+[Output Head] Linear(3072 → num_channels)
+    ↓
+Output: [B, target_length, num_channels]
+```
+
+**Module descriptions:**
+
+| Module | Components | Function |
+|--------|------------|----------|
+| **Stem** | Conv1d + ConvBlock + AttentionPool | Converts 4-channel one-hot sequences to 768-dimensional features and performs the only spatial downsampling |
+| **Conv Tower** | 7 layers of ConvBlock + Residual | Gradually increases channel count from 768 to 1536 while keeping spatial length unchanged |
+| **Transformer Encoder** | 11 layers of Multi-Head Self-Attention + FFN | Captures long-range dependencies within sequences |
+| **Output Head** | ConvBlock + Linear | Maps features to predicted values for the target number of channels |
+
+**Key design:** Downsampling is performed only once in the Stem via AttentionPool (`pool_size` is configurable). The subsequent Conv Tower and Transformer do not perform any spatial downsampling, only channel-wise feature extraction.
+
+# 5. Frequently Asked Questions
+
+**Q1: How to modify the downsampling ratio?**
+
+Modify the `pool_size` value in `config.py`, and adjust `input_length` accordingly to ensure it is divisible by `pool_size`. For example: `pool_size=2` + `input_length=10000` → output length 5000.
+
+**Q2: How to add new sequencing data tracks?**
+
+During data processing, stack all tracks into the third dimension of the label `.npy` file. The number of channels is automatically read from the label file during training; no model code modification is needed.
+
+**Q3: What to do if GPU memory is insufficient?**
+
+- Reduce `batch_size` (e.g., to 2 or 4)
+- Enable `--use_checkpointing` (gradient checkpointing)
+- Reduce `dim` or `depth` (modify in `config.py`)
+
+**Q4: Are variable-length input sequences supported?**
+
+Yes. Entries in the FASTA file may have different sequence lengths; the model automatically applies dynamic padding within each batch. The only requirement is that each sequence length be divisible by `pool_size`. Padded regions are excluded via masking and do not affect training.
+
+**Q5: What to do if the Coverage loss is very large?**
+
+Coverage labels are typically raw count values with enormous dynamic range. The log1p transform (`y' = log(1 + y)`) is enabled by default to compress labels into a reasonable range. **Metrics are computed in log1p-transformed space by default** (`--metrics_space log1p`); you may switch to original-space computation via `--metrics_space original`. **Ensure that labels are not double log1p-transformed.**
+
+# 6. Citation
+
+> Avsec, Ž., Agarwal, V., Visentin, D. et al. Effective gene expression prediction from sequence by integrating long-range interactions. *Nat Methods* 18, 1196–1203 (2021). https://doi.org/10.1038/s41592-021-01252-x
